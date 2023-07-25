@@ -3,7 +3,7 @@ using BinaryBuilderBase
 using Pkg
 
 name = "XGBoost"
-version = v"1.7.5"
+version = v"1.7.6"
 
 const YGGDRASIL_DIR = "../.."
 include(joinpath(YGGDRASIL_DIR, "fancy_toys.jl"))
@@ -11,7 +11,7 @@ include(joinpath(YGGDRASIL_DIR, "platforms", "cuda.jl"))
 
 # Collection of sources required to build XGBoost
 sources = [
-    GitSource("https://github.com/dmlc/xgboost.git","21d95f3d8f23873a76f8afaad0fee5fa3e00eafe"), 
+    GitSource("https://github.com/dmlc/xgboost.git","36eb41c960483c8b52b44082663c99e6a0de440a"), 
     DirectorySource("./bundled"),
 ]
 
@@ -25,17 +25,26 @@ git submodule update --init
 
 mkdir build && cd build
 if  [[ $bb_full_target == *-linux*cuda+1* ]]; then
+    # check if we need to use a more recent glibc
+    if [[ -f "$prefix/usr/include/sched.h" ]]; then
+        GLIBC_ARTIFACT_DIR=$(dirname $(dirname $(dirname $(realpath $prefix/usr/include/sched.h))))
+        rsync --archive ${GLIBC_ARTIFACT_DIR}/ /opt/${target}/${target}/sys-root/
+    fi
+
     # nvcc writes to /tmp, which is a small tmpfs in our sandbox.
     # make it use the workspace instead
     export TMPDIR=${WORKSPACE}/tmpdir
     mkdir ${TMPDIR}
-    
+
     export CUDA_HOME=${WORKSPACE}/destdir/cuda
     export PATH=$PATH:$CUDA_HOME/bin
     cmake .. -DCMAKE_INSTALL_PREFIX=${prefix} \
             -DCMAKE_TOOLCHAIN_FILE="${CMAKE_TARGET_TOOLCHAIN}" \
-            -DCUDA_TOOLKIT_ROOT_DIR=${WORKSPACE}/destdir/cuda \
             -DUSE_CUDA=ON \
+            -DCUDA_TOOLKIT_ROOT_DIR=${WORKSPACE}/destdir/cuda \
+            -DUSE_NCCL=ON \
+            -DNCCL_ROOT=${WORKSPACE}/destdir \
+            -DBUILD_WITH_SHARED_NCCL=ON \
             -DBUILD_WITH_CUDA_CUB=ON
     make -j${nproc}
 else
@@ -62,9 +71,9 @@ install_license LICENSE
 augment_platform_block = CUDA.augment
 
 versions_to_build = [
-    nothing,
+    #nothing,
     v"11.0",
-    v"12.0", 
+    #v"12.0", 
 ]
 
 # XXX: support only specifying major/minor version (JuliaPackaging/BinaryBuilder.jl#/1212)
@@ -86,6 +95,7 @@ products = [
 ]
 
 platforms = expand_cxxstring_abis(supported_platforms())
+platforms = platforms[4:4]
 
 for cuda_version in versions_to_build, platform in platforms
 
@@ -116,11 +126,16 @@ for cuda_version in versions_to_build, platform in platforms
     if !isnothing(cuda_version)
         push!(dependencies, BuildDependency(PackageSpec(name="CUDA_full_jll", version=cuda_full_versions[cuda_version])))
         push!(dependencies, RuntimeDependency(PackageSpec(name="CUDA_Runtime_jll")))
+        push!(dependencies, BuildDependency(PackageSpec(name="NCCL_jll")))
+        # NCCL_jll requires glibc 2.17
+        # which isn't compatible with current Linux kernel headers,
+        # so use the next packaged version
+        push!(dependencies, BuildDependency(PackageSpec(name = "Glibc_jll", version = v"2.17")))
     end
     preamble = cuda_preambles[cuda_version]
     
     build_tarballs(ARGS, name, version, sources,  preamble*script, [augmented_platform], products, dependencies; 
-                    preferred_gcc_version=v"8", 
+                    preferred_gcc_version=v"9", 
                     julia_compat="1.6",
                     augment_platform_block)
 end
